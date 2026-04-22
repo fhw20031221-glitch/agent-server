@@ -1,0 +1,8 @@
+:8443 {
+	tls internal
+	reverse_proxy agent-server:8000
+}
+
+:8080 {
+	redir https://{host}:8443{uri}
+}
