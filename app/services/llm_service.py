@@ -9,13 +9,15 @@ import httpx
 from app.core.config import settings
 
 
-def sanitize_generated_text(text: str) -> str:
+def sanitize_generated_text(text: str, *, aggressive: bool = True) -> str:
     cleaned = (text or "").strip()
-    for marker in [
+    basic_markers = [
         "<|endoftext|>",
         "<|im_end|>",
         "<|im_start|>user",
         "<|im_start|>assistant",
+    ]
+    aggressive_markers = [
         "\nuser\n",
         "\nassistant\n",
         "\nHuman:",
@@ -24,10 +26,13 @@ def sanitize_generated_text(text: str) -> str:
         "Human:",
         "Assistant:",
         "User:",
-    ]:
+    ]
+    markers = basic_markers + aggressive_markers if aggressive else basic_markers
+    for marker in markers:
         if marker in cleaned:
             cleaned = cleaned.split(marker, 1)[0].strip()
-    cleaned = re.split(r"(?:\n|^)(?:###\s*)?(?:Human|Assistant|User)\s*:", cleaned, maxsplit=1)[0].strip()
+    if aggressive:
+        cleaned = re.split(r"(?:\n|^)(?:###\s*)?(?:Human|Assistant|User)\s*:", cleaned, maxsplit=1)[0].strip()
     return cleaned
 
 
@@ -46,6 +51,7 @@ async def stream_completion(
     user_prompt: str,
     max_tokens: int = 1024,
     temperature: float = 0.2,
+    aggressive_sanitize: bool = True,
 ) -> AsyncIterator[tuple[str, dict | str]]:
     if not settings.openai_api_key:
         raise RuntimeError("服务端未配置 OpenAI-compatible API Key")
@@ -97,7 +103,7 @@ async def stream_completion(
                     if not piece:
                         continue
                     accumulated_text += piece
-                    yield "partial", sanitize_generated_text(accumulated_text)
+                    yield "partial", sanitize_generated_text(accumulated_text, aggressive=aggressive_sanitize)
     except httpx.ReadTimeout as exc:
         raise RuntimeError(
             f"调用模型超时（{settings.openai_timeout_seconds} 秒）。请检查当前网络、代理设置，或稍后重试。"
@@ -115,7 +121,7 @@ async def stream_completion(
     except httpx.HTTPError as exc:
         raise RuntimeError(f"模型请求失败: {exc}") from exc
 
-    cleaned = sanitize_generated_text(accumulated_text)
+    cleaned = sanitize_generated_text(accumulated_text, aggressive=aggressive_sanitize)
     if completion_tokens <= 0 and cleaned:
         completion_tokens = max(1, len(cleaned) // 2)
     yield "usage", {

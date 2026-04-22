@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+ChatMode = Literal["ask", "code"]
+NextActionType = Literal["review_patch", "apply_patch", "add_context", "retry"]
+EditPlanStatus = Literal["none", "ready", "invalid"]
 
 
 class SnippetInput(BaseModel):
@@ -14,6 +19,7 @@ class SnippetInput(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1)
+    mode: ChatMode = "ask"
     project_name: str = ""
     active_file: str = ""
     chat_files: list[str] = Field(default_factory=list)
@@ -41,5 +47,35 @@ class ChatMessageRead(BaseModel):
     session_id: str
     role: str
     content: str
-    metadata: dict
+    metadata: dict[str, Any]
     created_at: datetime
+
+
+class ExecutionSummaryStep(BaseModel):
+    phase: str
+    title: str
+    detail: str
+    status: str
+
+
+class ExecutionSummary(BaseModel):
+    headline: str = ""
+    steps: list[ExecutionSummaryStep] = Field(default_factory=list)
+
+
+class NextAction(BaseModel):
+    type: NextActionType
+    label: str
+    path: str = ""
+
+
+class EditPlanEdit(BaseModel):
+    path: str
+    search: str
+    replace: str
+
+
+class EditPlan(BaseModel):
+    status: EditPlanStatus = "none"
+    explanation: str = ""
+    edits: list[EditPlanEdit] = Field(default_factory=list)
