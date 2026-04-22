@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.security import (
     create_access_token,
     create_refresh_token,
+    ensure_utc,
     hash_password,
     hash_refresh_token,
     utcnow,
@@ -68,7 +69,9 @@ def revoke_refresh_token(db: Session, raw_refresh_token: str) -> None:
 def rotate_refresh_token(db: Session, raw_refresh_token: str) -> tuple[User, str, str]:
     hashed = hash_refresh_token(raw_refresh_token)
     record = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == hashed))
-    if record is None or record.revoked_at is not None or record.expires_at <= utcnow():
+    expires_at = ensure_utc(record.expires_at) if record is not None else None
+    revoked_at = ensure_utc(record.revoked_at) if record is not None else None
+    if record is None or revoked_at is not None or expires_at is None or expires_at <= utcnow():
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token 无效或已过期")
 
     user = db.get(User, record.user_id)

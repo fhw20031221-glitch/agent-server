@@ -72,31 +72,48 @@ async def stream_completion(
     prompt_tokens = 0
     completion_tokens = 0
 
-    async with httpx.AsyncClient(timeout=settings.openai_timeout_seconds) as client:
-        async with client.stream("POST", url, json=payload, headers=headers) as response:
-            response.raise_for_status()
-            async for raw_line in response.aiter_lines():
-                line = raw_line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
+    try:
+        async with httpx.AsyncClient(timeout=settings.openai_timeout_seconds) as client:
+            async with client.stream("POST", url, json=payload, headers=headers) as response:
+                response.raise_for_status()
+                async for raw_line in response.aiter_lines():
+                    line = raw_line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
 
-                chunk = json.loads(data_str)
-                usage = chunk.get("usage") or {}
-                prompt_tokens = max(prompt_tokens, int(usage.get("prompt_tokens", 0) or 0))
-                completion_tokens = max(completion_tokens, int(usage.get("completion_tokens", 0) or 0))
+                    chunk = json.loads(data_str)
+                    usage = chunk.get("usage") or {}
+                    prompt_tokens = max(prompt_tokens, int(usage.get("prompt_tokens", 0) or 0))
+                    completion_tokens = max(completion_tokens, int(usage.get("completion_tokens", 0) or 0))
 
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                piece = str(delta.get("content") or "")
-                if not piece:
-                    continue
-                accumulated_text += piece
-                yield "partial", sanitize_generated_text(accumulated_text)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    piece = str(delta.get("content") or "")
+                    if not piece:
+                        continue
+                    accumulated_text += piece
+                    yield "partial", sanitize_generated_text(accumulated_text)
+    except httpx.ReadTimeout as exc:
+        raise RuntimeError(
+            f"调用模型超时（{settings.openai_timeout_seconds} 秒）。请检查当前网络、代理设置，或稍后重试。"
+        ) from exc
+    except httpx.ConnectError as exc:
+        raise RuntimeError("无法连接模型服务，请检查网络或服务端出网能力。") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+        try:
+            detail = exc.response.text.strip()
+        except Exception:
+            detail = ""
+        suffix = f": {detail[:300]}" if detail else ""
+        raise RuntimeError(f"模型服务返回 HTTP {exc.response.status_code}{suffix}") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"模型请求失败: {exc}") from exc
 
     cleaned = sanitize_generated_text(accumulated_text)
     if completion_tokens <= 0 and cleaned:

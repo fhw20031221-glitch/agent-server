@@ -132,7 +132,8 @@ async def ask_stream(
                     model = str(usage.get("model") or "")
                     provider = str(usage.get("provider") or provider)
         except Exception as exc:
-            yield sse_event({"type": "error", "message": str(exc)})
+            error_message = str(exc).strip() or "模型请求失败，请检查网络、服务端配置或稍后重试。"
+            yield sse_event({"type": "error", "message": error_message})
             yield "data: [DONE]\n\n"
             return
 
