@@ -33,3 +33,24 @@ return True
         },
     ]
     assert extract_non_block_text(raw) == "准备修改如下。"
+
+
+def test_parse_edit_blocks_supports_create_file_with_empty_search():
+    raw = """新增文件如下。
+
+docs/usage.md
+<<<<<<< SEARCH
+=======
+# Usage
+hello
+>>>>>>> REPLACE
+"""
+    blocks = parse_edit_blocks(raw)
+
+    assert blocks == [
+        {
+            "path": "docs/usage.md",
+            "search": "",
+            "replace": "# Usage\nhello",
+        }
+    ]

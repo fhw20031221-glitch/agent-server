@@ -54,3 +54,26 @@ bar()
     assert metadata["edit_plan_status"] == "ready"
     assert metadata["edit_paths"] == ["app/main.py"]
     assert "edits" not in metadata
+
+
+def test_build_edit_plan_returns_ready_for_create_file_block():
+    raw = """新增测试文档。
+
+docs/usage.md
+<<<<<<< SEARCH
+=======
+# Usage
+hello
+>>>>>>> REPLACE
+"""
+    plan = build_edit_plan(raw)
+
+    assert plan["status"] == "ready"
+    assert plan["explanation"] == "新增测试文档。"
+    assert plan["edits"] == [
+        {
+            "path": "docs/usage.md",
+            "search": "",
+            "replace": "# Usage\nhello",
+        }
+    ]

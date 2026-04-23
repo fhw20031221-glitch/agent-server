@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 BLOCK_RE = re.compile(
-    r"(?ms)(?:^|\n)(?P<path>[^\n`][^\n]*?)\n<<<<<<< SEARCH\n(?P<search>.*?)\n=======\n(?P<replace>.*?)\n>>>>>>> REPLACE"
+    r"(?ms)(?:^|\n)(?P<path>[^\n`][^\n]*?)\n<<<<<<< SEARCH\n(?P<body>.*?)\n>>>>>>> REPLACE"
 )
 
 
@@ -27,9 +27,16 @@ def parse_edit_blocks(text: str) -> list[dict[str, str]]:
     blocks: list[dict[str, str]] = []
     for match in BLOCK_RE.finditer(normalized):
         path = normalize_display_path(match.group("path"))
-        search = match.group("search").replace("\r\n", "\n")
-        replace = match.group("replace").replace("\r\n", "\n")
-        if not path or not search:
+        body = match.group("body").replace("\r\n", "\n")
+        if not path:
+            continue
+        separator = "\n=======\n"
+        if body.startswith("=======\n"):
+            search = ""
+            replace = body[len("=======\n"):]
+        elif separator in body:
+            search, replace = body.split(separator, 1)
+        else:
             continue
         blocks.append({
             "path": path,
