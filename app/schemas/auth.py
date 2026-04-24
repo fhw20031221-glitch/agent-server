@@ -11,6 +11,7 @@ class UserRead(BaseModel):
     id: str
     username: str
     email: str | None = None
+    role: str
     status: str
     monthly_token_limit: int
     created_at: datetime
@@ -47,4 +48,5 @@ class AuthResponse(BaseModel):
 class QuotaRead(BaseModel):
     monthly_token_limit: int
     used_tokens: int
+    adjustment_tokens: int = 0
     remaining_tokens: int

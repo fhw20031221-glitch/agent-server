@@ -7,6 +7,7 @@ from typing import AsyncIterator
 import httpx
 
 from app.core.config import settings
+from app.services.model_service import RuntimeModel
 
 
 def sanitize_generated_text(text: str, *, aggressive: bool = True) -> str:
@@ -49,27 +50,38 @@ async def stream_completion(
     *,
     system_prompt: str,
     user_prompt: str,
+    model_config: RuntimeModel | None = None,
     max_tokens: int = 1024,
     temperature: float = 0.2,
     aggressive_sanitize: bool = True,
 ) -> AsyncIterator[tuple[str, dict | str]]:
-    if not settings.openai_api_key:
+    runtime_model = model_config or RuntimeModel(
+        model_key=settings.openai_model,
+        display_name=settings.openai_model,
+        provider="openai-compatible",
+        base_url=settings.openai_base_url,
+        api_key=settings.openai_api_key,
+        upstream_model=settings.openai_model,
+        max_tokens=max_tokens,
+        temperature_default=temperature,
+    )
+    if not runtime_model.api_key:
         raise RuntimeError("服务端未配置 OpenAI-compatible API Key")
 
-    url = resolve_chat_completions_url(settings.openai_base_url)
+    url = resolve_chat_completions_url(runtime_model.base_url)
     payload = {
-        "model": settings.openai_model,
+        "model": runtime_model.upstream_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": max(1, int(max_tokens)),
-        "temperature": float(temperature),
+        "max_tokens": max(1, int(max_tokens or runtime_model.max_tokens)),
+        "temperature": float(temperature if temperature is not None else runtime_model.temperature_default),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
     headers = {
-        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Authorization": f"Bearer {runtime_model.api_key}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
@@ -129,6 +141,6 @@ async def stream_completion(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
-        "model": settings.openai_model,
-        "provider": "openai-compatible",
+        "model": runtime_model.model_key,
+        "provider": runtime_model.provider,
     }

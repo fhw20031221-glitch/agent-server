@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,6 +13,7 @@ from app.services import (
     chat_protocol,
     chat_service,
     llm_service,
+    model_service,
     prompt_service,
     quota_service,
     usage_service,
@@ -82,15 +82,17 @@ async def ask_stream(
         remaining_tokens = quota_service.get_remaining_tokens(db, current_user)
         if remaining_tokens <= 0:
             raise HTTPException(status_code=402, detail="本月 Token 额度已用尽")
+        selected_model = model_service.resolve_model(db, payload.model_key)
 
         recent_messages = chat_service.list_recent_messages_payload(db, session, limit=8)
-        chat_service.create_message(
-            db,
-            session,
-            role="user",
-            content=payload.question,
-            metadata={"mode": payload.mode},
-        )
+        if not (payload.mode == "code" and payload.context_retry):
+            chat_service.create_message(
+                db,
+                session,
+                role="user",
+                content=payload.question,
+                metadata={"mode": payload.mode},
+            )
 
     selected_files = [item.path for item in payload.snippets]
     prompt_kwargs = {
@@ -141,7 +143,7 @@ async def ask_stream(
         yield emit_activity(
             phase="model_call",
             title="调用远程模型",
-            detail="正在向 OpenAI-compatible API 发起流式请求",
+            detail=f"正在调用 {selected_model.display_name}",
             status="running",
         )
 
@@ -149,8 +151,9 @@ async def ask_stream(
             async for kind, item in llm_service.stream_completion(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=max_tokens,
-                temperature=0.2,
+                model_config=selected_model,
+                max_tokens=min(max_tokens, selected_model.max_tokens),
+                temperature=selected_model.temperature_default,
                 aggressive_sanitize=payload.mode == "ask",
             ):
                 if kind == "partial":
@@ -186,21 +189,38 @@ async def ask_stream(
         edit_plan = chat_protocol.default_edit_plan()
         if payload.mode == "code":
             yield emit_activity(
-                phase="parse_edits",
-                title="解析编辑块",
-                detail="正在从模型结果中提取 SEARCH/REPLACE 编辑块",
+                phase="interpret_response",
+                title="处理模型输出",
+                detail="正在识别普通回复、上下文请求或 SEARCH/REPLACE 编辑块",
                 status="running",
             )
             edit_plan = chat_protocol.build_edit_plan(final_text)
-            parse_detail = {
-                "ready": f"已解析出 {len(edit_plan.get('edits', []))} 个可预览编辑块",
-                "none": str(edit_plan.get("explanation") or "当前上下文不足以安全修改"),
-                "invalid": str(edit_plan.get("explanation") or "模型输出无法解析为有效编辑块"),
-            }.get(str(edit_plan.get("status") or "invalid"), "编辑块解析完成")
+            edit_status = str(edit_plan.get("status") or "invalid")
+            has_no_changes_marker = chat_protocol.has_no_changes_marker(final_text)
+            if edit_status == "ready":
+                parse_phase = "parse_edits"
+                parse_title = "解析编辑块"
+                parse_detail = f"已解析出 {len(edit_plan.get('edits', []))} 个可预览编辑块"
+            elif edit_status == "needs_context":
+                parse_phase = "context_request"
+                parse_title = "请求补充上下文"
+                parse_detail = str(edit_plan.get("explanation") or "需要补充更多上下文后继续生成")
+            elif edit_status == "none" and not has_no_changes_marker:
+                parse_phase = "interpret_response"
+                parse_title = "识别普通回复"
+                parse_detail = "模型返回普通回复，未生成代码修改"
+            elif edit_status == "none":
+                parse_phase = "interpret_response"
+                parse_title = "无需修改"
+                parse_detail = str(edit_plan.get("explanation") or "模型判断不需要修改")
+            else:
+                parse_phase = "parse_edits"
+                parse_title = "解析编辑块"
+                parse_detail = str(edit_plan.get("explanation") or "模型输出无法解析为有效编辑块")
             parse_status = "done" if str(edit_plan.get("status") or "invalid") != "invalid" else "error"
             yield emit_activity(
-                phase="parse_edits",
-                title="解析编辑块",
+                phase=parse_phase,
+                title=parse_title,
                 detail=parse_detail,
                 status=parse_status,
             )
@@ -228,6 +248,8 @@ async def ask_stream(
             "cache_hits": 0,
         }
 
+        message_id = ""
+        should_persist_assistant = str(edit_plan.get("status") or "") != "needs_context"
         with session_scope() as db:
             user = db.get(User, current_user.id)
             if user is None:
@@ -241,13 +263,15 @@ async def ask_stream(
                 yield "data: [DONE]\n\n"
                 return
 
-            assistant_message = chat_service.create_message(
-                db,
-                session,
-                role="assistant",
-                content=response_text,
-                metadata=message_metadata,
-            )
+            if should_persist_assistant:
+                assistant_message = chat_service.create_message(
+                    db,
+                    session,
+                    role="assistant",
+                    content=response_text,
+                    metadata=message_metadata,
+                )
+                message_id = assistant_message.id
             remaining = usage_service.record_usage(
                 db,
                 user=user,
@@ -269,7 +293,7 @@ async def ask_stream(
                 stats=stats,
                 quota_remaining_tokens=remaining,
                 session_id=session_id,
-                message_id=assistant_message.id,
+                message_id=message_id,
             )
         )
         yield "data: [DONE]\n\n"

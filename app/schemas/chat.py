@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ChatMode = Literal["ask", "code"]
 NextActionType = Literal["review_patch", "apply_patch", "add_context", "retry"]
-EditPlanStatus = Literal["none", "ready", "invalid"]
+EditPlanStatus = Literal["none", "ready", "invalid", "needs_context"]
 
 
 class SnippetInput(BaseModel):
@@ -20,11 +20,13 @@ class SnippetInput(BaseModel):
 class AskRequest(BaseModel):
     question: str = Field(min_length=1)
     mode: ChatMode = "ask"
+    model_key: str | None = Field(default=None, max_length=120)
     project_name: str = ""
     active_file: str = ""
     chat_files: list[str] = Field(default_factory=list)
     repo_map_text: str = ""
     snippets: list[SnippetInput] = Field(default_factory=list)
+    context_retry: bool = False
 
 
 class ChatSessionCreateRequest(BaseModel):
@@ -79,3 +81,5 @@ class EditPlan(BaseModel):
     status: EditPlanStatus = "none"
     explanation: str = ""
     edits: list[EditPlanEdit] = Field(default_factory=list)
+    context_queries: list[str] = Field(default_factory=list)
+    context_paths: list[str] = Field(default_factory=list)

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
     openai_timeout_seconds: int = 120
+    admin_username: str = ""
+    admin_password: str = ""
+    admin_email: str = ""
     cors_origins_raw: str = Field(default="", alias="CORS_ORIGINS")
 
     @property

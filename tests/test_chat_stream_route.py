@@ -289,3 +289,184 @@ hello
 
     app.dependency_overrides.clear()
     client.close()
+
+
+def test_code_stream_route_allows_non_edit_reply(monkeypatch):
+    client, SessionLocal, session_id = _build_test_context(monkeypatch)
+
+    async def fake_stream_completion(**kwargs):
+        assert kwargs["aggressive_sanitize"] is False
+        yield "usage", {
+            "text": "你好，我在。请告诉我你想修改什么。",
+            "prompt_tokens": 16,
+            "completion_tokens": 8,
+            "total_tokens": 24,
+            "model": "deepseek-chat",
+            "provider": "openai-compatible",
+        }
+
+    monkeypatch.setattr(chat_route.llm_service, "stream_completion", fake_stream_completion)
+
+    response = client.post(
+        f"/chat/sessions/{session_id}/ask/stream",
+        json={
+            "mode": "code",
+            "question": "你好",
+            "project_name": "demo",
+            "active_file": "sample.py",
+            "chat_files": ["sample.py"],
+            "repo_map_text": "- sample.py",
+            "snippets": [
+                {
+                    "path": "sample.py",
+                    "language": "python",
+                    "content": "print('hello')\n",
+                    "note": "",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _parse_sse_payloads(response.text)
+    result = next(item for item in payloads if isinstance(item, dict) and item["type"] == "result")
+    activities = [item["payload"] for item in payloads if isinstance(item, dict) and item["type"] == "activity"]
+    assert result["mode"] == "code"
+    assert result["response"] == "你好，我在。请告诉我你想修改什么。"
+    assert result["edit_plan"]["status"] == "none"
+    assert result["next_actions"] == []
+    assert any(item["title"] == "识别普通回复" for item in activities)
+    assert not any(item["title"] == "解析编辑块" for item in activities if item["status"] == "done")
+
+    with SessionLocal() as db:
+        rows = list(db.scalars(select(ChatMessage).order_by(ChatMessage.created_at.asc())))
+        assert len(rows) == 2
+        assert rows[0].role == "user"
+        assert rows[1].role == "assistant"
+        assert rows[1].content == "你好，我在。请告诉我你想修改什么。"
+        assert rows[1].meta["edit_plan_status"] == "none"
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
+def test_code_stream_route_returns_context_request_without_persisting_assistant(monkeypatch):
+    client, SessionLocal, session_id = _build_test_context(monkeypatch)
+
+    async def fake_stream_completion(**kwargs):
+        raw = """CONTEXT_REQUEST
+reason: 需要查看路由和服务实现后才能安全修改。
+queries:
+- auth route service
+paths:
+- app/api/routes/auth.py
+- app/services/auth_service.py
+"""
+        yield "usage", {
+            "text": raw,
+            "prompt_tokens": 18,
+            "completion_tokens": 16,
+            "total_tokens": 34,
+            "model": "deepseek-chat",
+            "provider": "openai-compatible",
+        }
+
+    monkeypatch.setattr(chat_route.llm_service, "stream_completion", fake_stream_completion)
+
+    response = client.post(
+        f"/chat/sessions/{session_id}/ask/stream",
+        json={
+            "mode": "code",
+            "question": "修复登录失败的问题",
+            "project_name": "demo",
+            "active_file": "README.md",
+            "chat_files": [],
+            "repo_map_text": "- app/api/routes/auth.py\n- app/services/auth_service.py",
+            "snippets": [],
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _parse_sse_payloads(response.text)
+    result = next(item for item in payloads if isinstance(item, dict) and item["type"] == "result")
+    assert result["edit_plan"]["status"] == "needs_context"
+    assert result["edit_plan"]["context_queries"] == ["auth route service"]
+    assert result["edit_plan"]["context_paths"] == ["app/api/routes/auth.py", "app/services/auth_service.py"]
+    assert [item["type"] for item in result["next_actions"]] == ["add_context", "retry"]
+    assert result["message_id"] == ""
+
+    with SessionLocal() as db:
+        rows = list(db.scalars(select(ChatMessage).order_by(ChatMessage.created_at.asc())))
+        assert len(rows) == 1
+        assert rows[0].role == "user"
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
+def test_code_stream_context_retry_does_not_duplicate_user_message(monkeypatch):
+    client, SessionLocal, session_id = _build_test_context(monkeypatch)
+
+    with SessionLocal() as db:
+        db.add(ChatMessage(session_id=session_id, role="user", content="修复登录失败的问题", meta={"mode": "code"}))
+        db.commit()
+
+    async def fake_stream_completion(**kwargs):
+        raw = "\n".join(
+            [
+                "已生成修改草案。",
+                "",
+                "app/api/routes/auth.py",
+                "<<<<<<< SEARCH",
+                "return False",
+                "=======",
+                "return True",
+                ">>>>>>> REPLACE",
+                "",
+            ]
+        )
+        yield "usage", {
+            "text": raw,
+            "prompt_tokens": 24,
+            "completion_tokens": 18,
+            "total_tokens": 42,
+            "model": "deepseek-chat",
+            "provider": "openai-compatible",
+        }
+
+    monkeypatch.setattr(chat_route.llm_service, "stream_completion", fake_stream_completion)
+
+    response = client.post(
+        f"/chat/sessions/{session_id}/ask/stream",
+        json={
+            "mode": "code",
+            "context_retry": True,
+            "question": "修复登录失败的问题",
+            "project_name": "demo",
+            "active_file": "app/api/routes/auth.py",
+            "chat_files": [],
+            "repo_map_text": "- app/api/routes/auth.py",
+            "snippets": [
+                {
+                    "path": "app/api/routes/auth.py",
+                    "language": "python",
+                    "content": "return False\n",
+                    "note": "",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _parse_sse_payloads(response.text)
+    result = next(item for item in payloads if isinstance(item, dict) and item["type"] == "result")
+    assert result["edit_plan"]["status"] == "ready"
+
+    with SessionLocal() as db:
+        rows = list(db.scalars(select(ChatMessage).order_by(ChatMessage.created_at.asc())))
+        assert [row.role for row in rows] == ["user", "assistant"]
+        assert rows[0].content == "修复登录失败的问题"
+        assert rows[1].meta["edit_plan_status"] == "ready"
+
+    app.dependency_overrides.clear()
+    client.close()

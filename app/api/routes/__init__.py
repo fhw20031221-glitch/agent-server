@@ -1,3 +1,3 @@
-from . import auth, chat, quota
+from . import admin, auth, chat, models, quota
 
-__all__ = ["auth", "chat", "quota"]
+__all__ = ["admin", "auth", "chat", "models", "quota"]
