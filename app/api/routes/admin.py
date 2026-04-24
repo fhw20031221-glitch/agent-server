@@ -154,6 +154,8 @@ def list_models(
     db: Session = Depends(get_db),
 ) -> list[LlmModelRead]:
     del current_admin
+    if model_service.ensure_settings_model(db):
+        db.commit()
     return [LlmModelRead.model_validate(row) for row in model_service.list_admin_models(db)]
 
 

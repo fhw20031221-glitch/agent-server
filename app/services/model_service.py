@@ -45,6 +45,63 @@ def _settings_model() -> RuntimeModel:
     )
 
 
+def ensure_settings_model(db: Session) -> bool:
+    model_key = (settings.openai_model or "").strip()
+    base_url = (settings.openai_base_url or "").strip().rstrip("/")
+    if not model_key or not base_url:
+        return False
+
+    row = db.scalar(select(LlmModel).where(LlmModel.model_key == model_key))
+    enabled_default = db.scalar(
+        select(LlmModel).where(
+            LlmModel.is_enabled.is_(True),
+            LlmModel.is_default.is_(True),
+        )
+    )
+    should_make_default = enabled_default is None
+
+    if row is None:
+        if should_make_default:
+            unset_other_defaults(db)
+        row = LlmModel(
+            model_key=model_key,
+            display_name=model_key,
+            provider="openai-compatible",
+            base_url=base_url,
+            api_key_env="AGENT_SERVER_OPENAI_API_KEY",
+            upstream_model=model_key,
+            max_tokens=8192,
+            temperature_default=0.2,
+            is_enabled=True,
+            is_default=should_make_default,
+            sort_order=0 if should_make_default else 50,
+        )
+        db.add(row)
+        return True
+
+    desired_values = {
+        "provider": "openai-compatible",
+        "base_url": base_url,
+        "api_key_env": "AGENT_SERVER_OPENAI_API_KEY",
+        "upstream_model": model_key,
+        "is_enabled": True,
+    }
+    if should_make_default and not row.is_default:
+        unset_other_defaults(db, row.id)
+        desired_values["is_default"] = True
+        desired_values["sort_order"] = min(row.sort_order, 50)
+
+    changed = False
+    for field_name, value in desired_values.items():
+        if getattr(row, field_name) != value:
+            setattr(row, field_name, value)
+            changed = True
+
+    if changed:
+        db.add(row)
+    return changed
+
+
 def _read_env_file_value(name: str) -> str:
     if not name:
         return ""

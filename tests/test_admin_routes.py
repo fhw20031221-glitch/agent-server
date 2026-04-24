@@ -28,7 +28,7 @@ def _override_db(SessionLocal):
         db.close()
 
 
-def _build_admin_context():
+def _build_admin_context(*, seed_deepseek_model: bool = True, seed_remote_model: bool = False):
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -69,21 +69,38 @@ def _build_admin_context():
                 project_name="demo",
             )
         )
-        db.add(
-            LlmModel(
-                model_key="deepseek-chat",
-                display_name="DeepSeek Chat",
-                provider="openai-compatible",
-                base_url="https://api.deepseek.com/v1",
-                api_key_env="AGENT_SERVER_OPENAI_API_KEY",
-                upstream_model="deepseek-chat",
-                max_tokens=8192,
-                temperature_default=0.2,
-                is_enabled=True,
-                is_default=True,
-                sort_order=10,
+        if seed_deepseek_model:
+            db.add(
+                LlmModel(
+                    model_key="deepseek-chat",
+                    display_name="DeepSeek Chat",
+                    provider="openai-compatible",
+                    base_url="https://api.deepseek.com/v1",
+                    api_key_env="AGENT_SERVER_OPENAI_API_KEY",
+                    upstream_model="deepseek-chat",
+                    max_tokens=8192,
+                    temperature_default=0.2,
+                    is_enabled=True,
+                    is_default=True,
+                    sort_order=10,
+                )
             )
-        )
+        if seed_remote_model:
+            db.add(
+                LlmModel(
+                    model_key="qwen-plus",
+                    display_name="qwen-plus",
+                    provider="bailian",
+                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    api_key_env="DASHSCOPE_API_KEY",
+                    upstream_model="qwen-plus",
+                    max_tokens=8192,
+                    temperature_default=0.2,
+                    is_enabled=True,
+                    is_default=True,
+                    sort_order=100,
+                )
+            )
         db.commit()
 
     def override_get_db():
@@ -124,6 +141,37 @@ def test_models_route_returns_enabled_models():
             "is_default": True,
         }
     ]
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
+def test_models_route_adds_settings_model_when_remote_models_exist(monkeypatch):
+    monkeypatch.setattr(model_service.settings, "openai_model", "deepseek-chat")
+    monkeypatch.setattr(model_service.settings, "openai_base_url", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(model_service.settings, "openai_api_key", "test-deepseek-key")
+    client, _user_id = _build_admin_context(seed_deepseek_model=False, seed_remote_model=True)
+
+    response = client.get("/models")
+
+    assert response.status_code == 200
+    rows = {item["model_key"]: item for item in response.json()}
+    assert rows["qwen-plus"]["is_default"] is True
+    assert rows["deepseek-chat"] == {
+        "model_key": "deepseek-chat",
+        "display_name": "deepseek-chat",
+        "provider": "openai-compatible",
+        "max_tokens": 8192,
+        "is_default": False,
+    }
+
+    admin_response = client.get("/admin/models")
+    assert admin_response.status_code == 200
+    admin_rows = {item["model_key"]: item for item in admin_response.json()}
+    assert admin_rows["deepseek-chat"]["base_url"] == "https://api.deepseek.com/v1"
+    assert admin_rows["deepseek-chat"]["api_key_env"] == "AGENT_SERVER_OPENAI_API_KEY"
+    assert admin_rows["deepseek-chat"]["upstream_model"] == "deepseek-chat"
+    assert admin_rows["deepseek-chat"]["is_enabled"] is True
 
     app.dependency_overrides.clear()
     client.close()

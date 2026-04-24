@@ -18,6 +18,8 @@ def list_models(
     db: Session = Depends(get_db),
 ) -> list[PublicModelRead]:
     del current_user
+    if model_service.ensure_settings_model(db):
+        db.commit()
     rows = model_service.list_public_models(db)
     result = []
     for row in rows:
