@@ -118,6 +118,7 @@ async def ask_stream(
 
     async def event_stream():
         final_text = ""
+        reasoning_content = ""
         prompt_tokens = 0
         completion_tokens = 0
         provider = "openai-compatible"
@@ -160,9 +161,19 @@ async def ask_stream(
                     final_text = str(item)
                     if payload.mode == "ask":
                         yield sse_event({"type": "partial", "text": final_text})
+                elif kind == "reasoning":
+                    reasoning_content = str(item)
+                    yield sse_event(
+                        {
+                            "type": "reasoning",
+                            "text": reasoning_content,
+                            "collapsed": True,
+                        }
+                    )
                 elif kind == "usage":
                     usage = dict(item)
                     final_text = str(usage.get("text") or final_text or "")
+                    reasoning_content = str(usage.get("reasoning_content") or reasoning_content or "")
                     prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
                     completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                     model = str(usage.get("model") or "")
@@ -237,6 +248,7 @@ async def ask_stream(
             execution_summary=execution_summary,
             next_actions=next_actions,
             edit_plan=edit_plan,
+            reasoning_content=reasoning_content,
         )
         stats = {
             "input_tokens": prompt_tokens,
@@ -294,6 +306,7 @@ async def ask_stream(
                 quota_remaining_tokens=remaining,
                 session_id=session_id,
                 message_id=message_id,
+                reasoning_content=reasoning_content,
             )
         )
         yield "data: [DONE]\n\n"

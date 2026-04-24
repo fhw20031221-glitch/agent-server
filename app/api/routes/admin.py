@@ -15,7 +15,13 @@ from app.schemas.admin import (
     SetRemainingQuotaRequest,
     UserStatusUpdateRequest,
 )
-from app.schemas.models import LlmModelCreate, LlmModelRead, LlmModelUpdate
+from app.schemas.models import (
+    LlmModelCreate,
+    LlmModelRead,
+    LlmModelSyncRequest,
+    LlmModelSyncResult,
+    LlmModelUpdate,
+)
 from app.services import model_service, quota_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -169,6 +175,46 @@ def create_model(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="模型标识已存在") from exc
     db.refresh(row)
     return LlmModelRead.model_validate(row)
+
+
+@router.post("/models/sync", response_model=LlmModelSyncResult)
+def sync_models(
+    payload: LlmModelSyncRequest,
+    current_admin: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> LlmModelSyncResult:
+    del current_admin
+    api_key = model_service.resolve_api_key(payload.api_key_env, payload.api_key)
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="模型同步 API Key 未配置")
+    try:
+        remote_models = model_service.fetch_openai_compatible_models(
+            base_url=payload.base_url,
+            api_key=api_key,
+        )
+        result = model_service.sync_remote_models(
+            db,
+            provider=payload.provider,
+            base_url=payload.base_url,
+            api_key_env=payload.api_key_env,
+            remote_models=remote_models,
+            model_key_prefix=payload.model_key_prefix,
+            default_model_key=payload.default_model_key,
+            max_tokens=payload.max_tokens,
+            temperature_default=payload.temperature_default,
+            enable_new_models=payload.enable_new_models,
+            enable_existing_models=payload.enable_existing_models,
+            disable_missing_models=payload.disable_missing_models,
+            sort_order_start=payload.sort_order_start,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return LlmModelSyncResult(**result)
 
 
 @router.patch("/models/{model_id}", response_model=LlmModelRead)

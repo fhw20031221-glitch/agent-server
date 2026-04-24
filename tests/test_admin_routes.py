@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 from app.api import deps
 from app.db.models import Base, ChatSession, LlmModel, User
 from app.main import app
+from app.services import model_service
 
 
 @contextmanager
@@ -123,6 +124,90 @@ def test_models_route_returns_enabled_models():
             "is_default": True,
         }
     ]
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
+def test_admin_can_sync_openai_compatible_models(monkeypatch):
+    client, _user_id = _build_admin_context()
+    captured = {}
+
+    def fake_fetch_openai_compatible_models(*, base_url, api_key, timeout_seconds=None):
+        captured["base_url"] = base_url
+        captured["api_key"] = api_key
+        captured["timeout_seconds"] = timeout_seconds
+        return [
+            model_service.RemoteModel(model_key="qwen-plus", created=1, owned_by="system"),
+            model_service.RemoteModel(model_key="qwen-turbo", created=2, owned_by="system"),
+        ]
+
+    monkeypatch.setattr(model_service, "fetch_openai_compatible_models", fake_fetch_openai_compatible_models)
+
+    response = client.post(
+        "/admin/models/sync",
+        json={
+            "provider": "bailian",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key_env": "DASHSCOPE_API_KEY",
+            "api_key": "test-sync-key",
+            "default_model_key": "qwen-plus",
+            "max_tokens": 32768,
+            "sort_order_start": 50,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {
+        "provider": "bailian",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "total_remote": 2,
+        "created": 2,
+        "updated": 0,
+        "disabled": 0,
+        "skipped": 0,
+        "default_model_key": "qwen-plus",
+    }
+    assert captured == {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key": "test-sync-key",
+        "timeout_seconds": None,
+    }
+
+    models_response = client.get("/admin/models")
+    assert models_response.status_code == 200
+    rows = {item["model_key"]: item for item in models_response.json()}
+    assert rows["qwen-plus"]["provider"] == "bailian"
+    assert rows["qwen-plus"]["upstream_model"] == "qwen-plus"
+    assert rows["qwen-plus"]["api_key_env"] == "DASHSCOPE_API_KEY"
+    assert rows["qwen-plus"]["max_tokens"] == 32768
+    assert rows["qwen-plus"]["is_default"] is True
+    assert rows["deepseek-chat"]["is_default"] is False
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
+def test_admin_model_sync_requires_api_key(monkeypatch):
+    client, _user_id = _build_admin_context()
+
+    def fake_fetch_openai_compatible_models(**kwargs):
+        raise AssertionError("fetch should not be called without an API key")
+
+    monkeypatch.setattr(model_service, "fetch_openai_compatible_models", fake_fetch_openai_compatible_models)
+
+    response = client.post(
+        "/admin/models/sync",
+        json={
+            "provider": "bailian",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key_env": "MISSING_MODEL_SYNC_KEY",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "模型同步 API Key 未配置"
 
     app.dependency_overrides.clear()
     client.close()

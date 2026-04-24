@@ -1,6 +1,13 @@
 """请求与响应模型。"""
 from .auth import AuthResponse, LoginRequest, LogoutRequest, QuotaRead, RefreshRequest, RegisterRequest, UserRead
-from .models import LlmModelCreate, LlmModelRead, LlmModelUpdate, PublicModelRead
+from .models import (
+    LlmModelCreate,
+    LlmModelRead,
+    LlmModelSyncRequest,
+    LlmModelSyncResult,
+    LlmModelUpdate,
+    PublicModelRead,
+)
 from .chat import (
     AskRequest,
     ChatMessageRead,
@@ -27,6 +34,8 @@ __all__ = [
     "LlmModelRead",
     "LlmModelCreate",
     "LlmModelUpdate",
+    "LlmModelSyncRequest",
+    "LlmModelSyncResult",
     "AskRequest",
     "ChatMode",
     "ChatMessageRead",

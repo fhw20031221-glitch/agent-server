@@ -220,8 +220,9 @@ def build_message_metadata(
     execution_summary: dict[str, Any],
     next_actions: list[dict[str, Any]],
     edit_plan: dict[str, Any],
+    reasoning_content: str = "",
 ) -> dict[str, Any]:
-    return {
+    metadata = {
         "mode": mode,
         "execution_summary": execution_summary,
         "next_actions": next_actions,
@@ -230,6 +231,13 @@ def build_message_metadata(
         "context_queries": _unique_nonempty([str(item) for item in edit_plan.get("context_queries", [])]),
         "context_paths": _unique_nonempty([str(item) for item in edit_plan.get("context_paths", [])]),
     }
+    reasoning_content = str(reasoning_content or "").strip()
+    if reasoning_content:
+        metadata["reasoning"] = {
+            "content": reasoning_content,
+            "collapsed": True,
+        }
+    return metadata
 
 
 def build_result_payload(
@@ -243,8 +251,9 @@ def build_result_payload(
     quota_remaining_tokens: int,
     session_id: str,
     message_id: str,
+    reasoning_content: str = "",
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "type": "result",
         "mode": mode,
         "response": response,
@@ -256,3 +265,10 @@ def build_result_payload(
         "session_id": session_id,
         "message_id": message_id,
     }
+    reasoning_content = str(reasoning_content or "").strip()
+    if reasoning_content:
+        payload["reasoning"] = {
+            "content": reasoning_content,
+            "collapsed": True,
+        }
+    return payload

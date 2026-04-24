@@ -87,6 +87,7 @@ async def stream_completion(
     }
 
     accumulated_text = ""
+    accumulated_reasoning = ""
     prompt_tokens = 0
     completion_tokens = 0
 
@@ -111,6 +112,11 @@ async def stream_completion(
                     if not choices:
                         continue
                     delta = choices[0].get("delta") or {}
+                    reasoning_piece = str(delta.get("reasoning_content") or "")
+                    if reasoning_piece:
+                        accumulated_reasoning += reasoning_piece
+                        yield "reasoning", accumulated_reasoning
+
                     piece = str(delta.get("content") or "")
                     if not piece:
                         continue
@@ -138,6 +144,7 @@ async def stream_completion(
         completion_tokens = max(1, len(cleaned) // 2)
     yield "usage", {
         "text": cleaned,
+        "reasoning_content": accumulated_reasoning.strip(),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,

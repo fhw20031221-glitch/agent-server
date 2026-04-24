@@ -154,6 +154,65 @@ def test_ask_stream_route_returns_partial_and_summary(monkeypatch):
     client.close()
 
 
+def test_ask_stream_route_forwards_reasoning_content(monkeypatch):
+    client, SessionLocal, session_id = _build_test_context(monkeypatch)
+
+    async def fake_stream_completion(**kwargs):
+        yield "reasoning", "先分析问题。"
+        yield "reasoning", "先分析问题。然后组织答案。"
+        yield "partial", "最终回答"
+        yield "usage", {
+            "text": "最终回答。",
+            "reasoning_content": "先分析问题。然后组织答案。",
+            "prompt_tokens": 12,
+            "completion_tokens": 20,
+            "total_tokens": 32,
+            "model": "qwen-plus",
+            "provider": "bailian",
+        }
+
+    monkeypatch.setattr(chat_route.llm_service, "stream_completion", fake_stream_completion)
+
+    response = client.post(
+        f"/chat/sessions/{session_id}/ask/stream",
+        json={
+            "mode": "ask",
+            "question": "解释一下",
+            "project_name": "demo",
+            "active_file": "",
+            "chat_files": [],
+            "repo_map_text": "",
+            "snippets": [],
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _parse_sse_payloads(response.text)
+    reasoning_events = [item for item in payloads if isinstance(item, dict) and item["type"] == "reasoning"]
+    assert [item["text"] for item in reasoning_events] == [
+        "先分析问题。",
+        "先分析问题。然后组织答案。",
+    ]
+    assert all(item["collapsed"] is True for item in reasoning_events)
+
+    result = next(item for item in payloads if isinstance(item, dict) and item["type"] == "result")
+    assert result["response"] == "最终回答。"
+    assert result["reasoning"] == {
+        "content": "先分析问题。然后组织答案。",
+        "collapsed": True,
+    }
+
+    with SessionLocal() as db:
+        assistant_row = list(db.scalars(select(ChatMessage).order_by(ChatMessage.created_at.asc())))[1]
+        assert assistant_row.meta["reasoning"] == {
+            "content": "先分析问题。然后组织答案。",
+            "collapsed": True,
+        }
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
 def test_code_stream_route_returns_edit_plan_without_persisting_edit_blocks(monkeypatch):
     client, SessionLocal, session_id = _build_test_context(monkeypatch)
 

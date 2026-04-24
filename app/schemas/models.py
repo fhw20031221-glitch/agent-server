@@ -57,3 +57,29 @@ class LlmModelUpdate(BaseModel):
     is_enabled: bool | None = None
     is_default: bool | None = None
     sort_order: int | None = Field(default=None, ge=0, le=100000)
+
+
+class LlmModelSyncRequest(BaseModel):
+    provider: str = Field(default="bailian", min_length=1, max_length=50)
+    base_url: str = Field(default="https://dashscope.aliyuncs.com/compatible-mode/v1", min_length=1, max_length=500)
+    api_key_env: str = Field(default="DASHSCOPE_API_KEY", min_length=1, max_length=120)
+    api_key: str | None = Field(default=None, max_length=500, repr=False)
+    model_key_prefix: str = Field(default="", max_length=30)
+    default_model_key: str | None = Field(default="qwen-plus", max_length=120)
+    max_tokens: int = Field(default=8192, ge=1, le=200000)
+    temperature_default: float = Field(default=0.2, ge=0, le=2)
+    enable_new_models: bool = True
+    enable_existing_models: bool = False
+    disable_missing_models: bool = False
+    sort_order_start: int = Field(default=100, ge=0, le=100000)
+
+
+class LlmModelSyncResult(BaseModel):
+    provider: str
+    base_url: str
+    total_remote: int
+    created: int
+    updated: int
+    disabled: int
+    skipped: int
+    default_model_key: str | None = None

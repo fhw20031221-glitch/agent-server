@@ -40,11 +40,41 @@ docker compose up --build
 - `GET /chat/sessions`
 - `GET /chat/sessions/{session_id}/messages`
 - `POST /chat/sessions/{session_id}/ask/stream`
+- `GET /models`
+- `POST /admin/models/sync`
 - `GET /healthz`
+
+## 百炼模型同步
+
+在 `.env` 中配置百炼 API Key：
+
+```env
+DASHSCOPE_API_KEY=你的百炼APIKey
+```
+
+管理员调用：
+
+```bash
+curl -X POST http://127.0.0.1:8000/admin/models/sync \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"bailian","api_key_env":"DASHSCOPE_API_KEY"}'
+```
+
+服务端会从 `https://dashscope.aliyuncs.com/compatible-mode/v1/models` 拉取模型列表，并写入 `llm_models`。用户聊天时传 `model_key` 即可切换模型；不传则使用默认模型。
+
+## 思考过程 SSE
+
+当上游模型返回 `reasoning_content` 时，服务端会额外发送：
+
+```json
+{"type":"reasoning","text":"累计思考过程","collapsed":true}
+```
+
+最终 `result` 也会包含 `reasoning.content` 与 `reasoning.collapsed`。未返回思考过程的模型不会发送该事件，保持原有 `partial/result` 行为。
 
 ## 说明
 
-- 第一阶段仅支持 ask-only
 - 不读取用户本地工作区
 - 不支持本地模型
 - refresh token 只存哈希，不存明文
