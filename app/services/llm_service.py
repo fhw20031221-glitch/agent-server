@@ -46,6 +46,30 @@ def resolve_chat_completions_url(base_url: str) -> str:
     return f"{raw}/chat/completions"
 
 
+def _decode_error_body(raw_body: bytes) -> str:
+    text = (raw_body or b"").decode("utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+            code = str(error.get("code") or "").strip()
+            if message and code:
+                return f"{message} ({code})"
+            if message:
+                return message
+        message = str(payload.get("message") or payload.get("msg") or "").strip()
+        if message:
+            return message
+    return text
+
+
 async def stream_completion(
     *,
     system_prompt: str,
@@ -94,7 +118,12 @@ async def stream_completion(
     try:
         async with httpx.AsyncClient(timeout=settings.openai_timeout_seconds) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    detail = _decode_error_body(await response.aread())
+                    suffix = f": {detail[:800]}" if detail else ""
+                    raise RuntimeError(
+                        f"模型服务返回 HTTP {response.status_code}（model={runtime_model.upstream_model}）{suffix}"
+                    )
                 async for raw_line in response.aiter_lines():
                     line = raw_line.strip()
                     if not line or not line.startswith("data:"):
