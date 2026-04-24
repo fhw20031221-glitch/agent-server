@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import admin, auth, chat, models, quota
+from app.api.routes import admin, agent, auth, chat, models, quota
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.admin_seed_service import ensure_initial_admin
@@ -39,4 +39,5 @@ app.include_router(auth.router)
 app.include_router(quota.router)
 app.include_router(models.router)
 app.include_router(chat.router)
+app.include_router(agent.router)
 app.include_router(admin.router)

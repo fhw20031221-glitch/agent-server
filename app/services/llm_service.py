@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -70,14 +70,33 @@ def _decode_error_body(raw_body: bytes) -> str:
     return text
 
 
-async def stream_completion(
+def _normalize_tool_call(raw: dict[str, Any]) -> dict[str, Any]:
+    function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+    arguments_json = str(function.get("arguments") or "")
+    arguments: Any
+    try:
+        arguments = json.loads(arguments_json) if arguments_json.strip() else {}
+    except json.JSONDecodeError:
+        arguments = arguments_json
+    return {
+        "id": str(raw.get("id") or ""),
+        "type": str(raw.get("type") or "function"),
+        "function": {
+            "name": str(function.get("name") or ""),
+            "arguments": arguments,
+            "arguments_json": arguments_json,
+        },
+    }
+
+
+async def stream_agent_turn(
     *,
-    system_prompt: str,
-    user_prompt: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
     model_config: RuntimeModel | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 2048,
     temperature: float = 0.2,
-    aggressive_sanitize: bool = True,
+    tool_choice: str = "auto",
 ) -> AsyncIterator[tuple[str, dict | str]]:
     runtime_model = model_config or RuntimeModel(
         model_key=settings.openai_model,
@@ -93,17 +112,18 @@ async def stream_completion(
         raise RuntimeError("服务端未配置 OpenAI-compatible API Key")
 
     url = resolve_chat_completions_url(runtime_model.base_url)
-    payload = {
+    payload: dict[str, Any] = {
         "model": runtime_model.upstream_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": messages,
         "max_tokens": max(1, int(max_tokens or runtime_model.max_tokens)),
         "temperature": float(temperature if temperature is not None else runtime_model.temperature_default),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = tool_choice or "auto"
+
     headers = {
         "Authorization": f"Bearer {runtime_model.api_key}",
         "Content-Type": "application/json",
@@ -114,6 +134,7 @@ async def stream_completion(
     accumulated_reasoning = ""
     prompt_tokens = 0
     completion_tokens = 0
+    tool_calls_by_index: dict[int, dict[str, Any]] = {}
 
     try:
         async with httpx.AsyncClient(timeout=settings.openai_timeout_seconds) as client:
@@ -147,33 +168,57 @@ async def stream_completion(
                         yield "reasoning", accumulated_reasoning
 
                     piece = str(delta.get("content") or "")
-                    if not piece:
-                        continue
-                    accumulated_text += piece
-                    yield "partial", sanitize_generated_text(accumulated_text, aggressive=aggressive_sanitize)
+                    if piece:
+                        accumulated_text += piece
+                        yield "partial", sanitize_generated_text(accumulated_text, aggressive=False)
+
+                    for raw_call in delta.get("tool_calls") or []:
+                        if not isinstance(raw_call, dict):
+                            continue
+                        index = int(raw_call.get("index", len(tool_calls_by_index)) or 0)
+                        current = tool_calls_by_index.setdefault(
+                            index,
+                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                        )
+                        if raw_call.get("id"):
+                            current["id"] = raw_call.get("id")
+                        if raw_call.get("type"):
+                            current["type"] = raw_call.get("type")
+                        raw_function = raw_call.get("function")
+                        if isinstance(raw_function, dict):
+                            current_function = current.setdefault("function", {"name": "", "arguments": ""})
+                            if raw_function.get("name"):
+                                current_function["name"] = str(current_function.get("name") or "") + str(
+                                    raw_function.get("name") or ""
+                                )
+                            if raw_function.get("arguments"):
+                                current_function["arguments"] = str(current_function.get("arguments") or "") + str(
+                                    raw_function.get("arguments") or ""
+                                )
     except httpx.ReadTimeout as exc:
         raise RuntimeError(
             f"调用模型超时（{settings.openai_timeout_seconds} 秒）。请检查当前网络、代理设置，或稍后重试。"
         ) from exc
     except httpx.ConnectError as exc:
         raise RuntimeError("无法连接模型服务，请检查网络或服务端出网能力。") from exc
-    except httpx.HTTPStatusError as exc:
-        detail = ""
-        try:
-            detail = exc.response.text.strip()
-        except Exception:
-            detail = ""
-        suffix = f": {detail[:300]}" if detail else ""
-        raise RuntimeError(f"模型服务返回 HTTP {exc.response.status_code}{suffix}") from exc
     except httpx.HTTPError as exc:
         raise RuntimeError(f"模型请求失败: {exc}") from exc
 
-    cleaned = sanitize_generated_text(accumulated_text, aggressive=aggressive_sanitize)
+    cleaned = sanitize_generated_text(accumulated_text, aggressive=False)
+    normalized_tool_calls = [
+        _normalize_tool_call(tool_calls_by_index[index])
+        for index in sorted(tool_calls_by_index)
+        if str(tool_calls_by_index[index].get("function", {}).get("name") or "").strip()
+    ]
+    for tool_call in normalized_tool_calls:
+        yield "tool_call", tool_call
+
     if completion_tokens <= 0 and cleaned:
         completion_tokens = max(1, len(cleaned) // 2)
     yield "usage", {
         "text": cleaned,
         "reasoning_content": accumulated_reasoning.strip(),
+        "tool_calls": normalized_tool_calls,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,

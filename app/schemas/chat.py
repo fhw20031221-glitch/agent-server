@@ -6,27 +6,35 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 ChatMode = Literal["ask", "code"]
-NextActionType = Literal["review_patch", "apply_patch", "add_context", "retry"]
-EditPlanStatus = Literal["none", "ready", "invalid", "needs_context"]
+NextActionType = Literal["review_patch", "apply_patch"]
 
 
-class SnippetInput(BaseModel):
-    path: str
-    language: str = "plaintext"
-    content: str
-    note: str = ""
+class AgentMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    role: str
+    content: Any = None
 
 
-class AskRequest(BaseModel):
-    question: str = Field(min_length=1)
+class AgentToolFunction(BaseModel):
+    name: str
+    description: str = ""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentTool(BaseModel):
+    type: Literal["function"] = "function"
+    function: AgentToolFunction
+
+
+class AgentTurnRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    question: str = ""
     mode: ChatMode = "ask"
     model_key: str | None = Field(default=None, max_length=120)
-    project_name: str = ""
-    active_file: str = ""
-    chat_files: list[str] = Field(default_factory=list)
-    repo_map_text: str = ""
-    snippets: list[SnippetInput] = Field(default_factory=list)
-    context_retry: bool = False
+    messages: list[AgentMessage] = Field(default_factory=list)
+    tools: list[AgentTool] = Field(default_factory=list)
+    persist_user_message: bool = False
 
 
 class ChatSessionCreateRequest(BaseModel):
@@ -70,16 +78,3 @@ class NextAction(BaseModel):
     label: str
     path: str = ""
 
-
-class EditPlanEdit(BaseModel):
-    path: str
-    search: str
-    replace: str
-
-
-class EditPlan(BaseModel):
-    status: EditPlanStatus = "none"
-    explanation: str = ""
-    edits: list[EditPlanEdit] = Field(default_factory=list)
-    context_queries: list[str] = Field(default_factory=list)
-    context_paths: list[str] = Field(default_factory=list)

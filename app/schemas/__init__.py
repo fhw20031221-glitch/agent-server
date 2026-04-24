@@ -9,17 +9,17 @@ from .models import (
     PublicModelRead,
 )
 from .chat import (
-    AskRequest,
+    AgentMessage,
+    AgentTool,
+    AgentToolFunction,
+    AgentTurnRequest,
     ChatMessageRead,
     ChatMode,
     ChatSessionCreateRequest,
     ChatSessionRead,
-    EditPlan,
-    EditPlanEdit,
     ExecutionSummary,
     ExecutionSummaryStep,
     NextAction,
-    SnippetInput,
 )
 
 __all__ = [
@@ -36,15 +36,15 @@ __all__ = [
     "LlmModelUpdate",
     "LlmModelSyncRequest",
     "LlmModelSyncResult",
-    "AskRequest",
+    "AgentMessage",
+    "AgentTool",
+    "AgentToolFunction",
+    "AgentTurnRequest",
     "ChatMode",
     "ChatMessageRead",
     "ChatSessionCreateRequest",
     "ChatSessionRead",
-    "EditPlan",
-    "EditPlanEdit",
     "ExecutionSummary",
     "ExecutionSummaryStep",
     "NextAction",
-    "SnippetInput",
 ]
