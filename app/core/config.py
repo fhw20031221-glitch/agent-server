@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
     openai_timeout_seconds: int = 120
+    agent_debug_tools: bool = False
     admin_username: str = ""
     admin_password: str = ""
     admin_email: str = ""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -7,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.db.models import User
 from app.db.session import session_scope
 from app.schemas.chat import AgentTurnRequest
@@ -14,6 +16,7 @@ from app.services import chat_protocol, chat_service, llm_service, model_service
 from app.utils.sse import sse_event
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+logger = logging.getLogger("agent.tools")
 
 
 def _truncate(value: Any, limit: int = 800) -> str:
@@ -61,6 +64,16 @@ def _message_dump(messages: list[Any]) -> list[dict[str, Any]]:
     return dumped
 
 
+def _tool_debug(message: str, **fields: Any) -> None:
+    if not settings.agent_debug_tools:
+        return
+    safe_fields: dict[str, Any] = {}
+    for key, value in fields.items():
+        text = str(value)
+        safe_fields[key] = text[:500] + "..." if len(text) > 500 else text
+    logger.warning("agent-route %s %s", message, safe_fields)
+
+
 @router.post("/turn/stream")
 async def agent_turn_stream(
     payload: AgentTurnRequest,
@@ -91,6 +104,20 @@ async def agent_turn_stream(
     messages = _message_dump(payload.messages)
     tools = [item.model_dump(exclude_none=True) for item in payload.tools]
     tool_trace = _extract_tool_trace(messages)
+    _tool_debug(
+        "turn_start",
+        request_id=request_id,
+        session_id=payload.session_id,
+        mode=payload.mode,
+        message_count=len(messages),
+        tool_count=len(tools),
+        tool_names=[
+            item.get("function", {}).get("name")
+            for item in tools
+            if isinstance(item.get("function"), dict)
+        ],
+        incoming_trace_count=len(tool_trace),
+    )
 
     async def event_stream():
         final_text = ""
@@ -144,6 +171,14 @@ async def agent_turn_stream(
                     tool_call = dict(item)
                     tool_calls.append(tool_call)
                     function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                    _tool_debug(
+                        "emit_tool_call",
+                        request_id=request_id,
+                        id=tool_call.get("id") or "",
+                        name=function.get("name") or "",
+                        arguments_type=type(function.get("arguments")).__name__,
+                        arguments_json_length=len(str(function.get("arguments_json") or "")),
+                    )
                     yield sse_event({"type": "tool_call", "tool_call": tool_call})
                     yield emit_working(
                         phase="tool_call",
@@ -252,6 +287,14 @@ async def agent_turn_stream(
             "session_id": payload.session_id,
             "message_id": message_id,
         }
+        _tool_debug(
+            "turn_result",
+            request_id=request_id,
+            tool_call_count=len(tool_calls),
+            response_length=len(final_text.strip()),
+            message_id=message_id,
+            remaining=remaining,
+        )
         if reasoning_content.strip():
             result_payload["reasoning"] = {"content": reasoning_content.strip(), "collapsed": True}
         yield sse_event(result_payload)

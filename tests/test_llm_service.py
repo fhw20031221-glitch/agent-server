@@ -143,3 +143,122 @@ async def test_stream_agent_turn_parses_streamed_tool_call(monkeypatch):
     usage = next(item for kind, item in events if kind == "usage")
     assert usage["tool_calls"][0]["function"]["arguments_json"] == '{"path":"app/main.py"}'
     assert usage["prompt_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_turn_parses_message_tool_call_with_object_arguments(monkeypatch):
+    edit_arguments = {
+        "summary": "补充主程序注释",
+        "edits": [
+            {
+                "path": "app/main.py",
+                "search": "app = FastAPI()",
+                "replace": "# 创建 FastAPI 应用\napp = FastAPI()",
+            }
+        ],
+    }
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {
+                "usage": {"prompt_tokens": 18, "completion_tokens": 6},
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "id": "call_edit",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_propose_edit",
+                                        "arguments": edit_arguments,
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+        ]
+        body = "\n\n".join(
+            [*[f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks], "data: [DONE]"]
+        )
+        return httpx.Response(200, text=body)
+
+    transport = httpx.MockTransport(handler)
+    original_async_client = httpx.AsyncClient
+
+    def async_client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(llm_service.httpx, "AsyncClient", async_client_factory)
+
+    events = []
+    async for kind, item in llm_service.stream_agent_turn(
+        messages=[{"role": "user", "content": "给主程序入口加上更多注释"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "workspace_propose_edit",
+                    "description": "编辑预览",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        model_config=_runtime_model(),
+    ):
+        events.append((kind, item))
+
+    tool_call = next(item for kind, item in events if kind == "tool_call")
+    assert tool_call["id"] == "call_edit"
+    assert tool_call["function"]["name"] == "workspace_propose_edit"
+    assert tool_call["function"]["arguments"] == edit_arguments
+    assert tool_call["function"]["arguments_json"] == json.dumps(edit_arguments, ensure_ascii=False, separators=(",", ":"))
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_turn_parses_legacy_function_call_chunks(monkeypatch):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {"choices": [{"delta": {"function_call": {"name": "workspace_search", "arguments": '{"query"'}}}]},
+            {"choices": [{"delta": {"function_call": {"arguments": ':"VALID_ASPECT_RATIOS"}'}}}]},
+            {"usage": {"prompt_tokens": 9, "completion_tokens": 3}, "choices": [{"delta": {}}]},
+        ]
+        body = "\n\n".join(
+            [*[f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks], "data: [DONE]"]
+        )
+        return httpx.Response(200, text=body)
+
+    transport = httpx.MockTransport(handler)
+    original_async_client = httpx.AsyncClient
+
+    def async_client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(llm_service.httpx, "AsyncClient", async_client_factory)
+
+    events = []
+    async for kind, item in llm_service.stream_agent_turn(
+        messages=[{"role": "user", "content": "搜索比例"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "workspace_search",
+                    "description": "搜索",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        model_config=_runtime_model(),
+    ):
+        events.append((kind, item))
+
+    tool_call = next(item for kind, item in events if kind == "tool_call")
+    assert tool_call["id"] == "function_call"
+    assert tool_call["function"]["name"] == "workspace_search"
+    assert tool_call["function"]["arguments"] == {"query": "VALID_ASPECT_RATIOS"}
