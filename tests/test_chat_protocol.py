@@ -1,4 +1,10 @@
-from app.services.chat_protocol import build_edit_plan, build_message_metadata, build_next_actions
+from app.services.chat_protocol import (
+    build_edit_plan,
+    build_message_metadata,
+    build_next_actions,
+    build_response_plan,
+    resolve_response_text,
+)
 
 
 def test_build_edit_plan_returns_ready_for_valid_blocks():
@@ -66,6 +72,25 @@ paths:
     assert plan["context_queries"] == ["login route auth service", "refresh token"]
     assert plan["context_paths"] == ["app/api/routes/auth.py", "app/services/auth_service.py"]
     assert [item["type"] for item in build_next_actions("code", plan)] == ["add_context", "retry"]
+
+
+def test_build_response_plan_returns_needs_context_for_ask_mode():
+    raw = """CONTEXT_REQUEST
+reason: 需要查看应用入口和路由注册后才能说明文件关系。
+queries:
+- fastapi app router include
+paths:
+- app/main.py
+- app/api/routes/chat.py
+"""
+    plan = build_response_plan(raw)
+
+    assert plan["status"] == "needs_context"
+    assert "应用入口" in plan["explanation"]
+    assert plan["context_queries"] == ["fastapi app router include"]
+    assert plan["context_paths"] == ["app/main.py", "app/api/routes/chat.py"]
+    assert [item["type"] for item in build_next_actions("ask", plan)] == ["add_context", "retry"]
+    assert resolve_response_text("ask", raw, plan) == plan["explanation"]
 
 
 def test_message_metadata_omits_edit_content():

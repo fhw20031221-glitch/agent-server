@@ -154,8 +154,17 @@ def build_edit_plan(raw_text: str) -> dict[str, Any]:
     ).model_dump()
 
 
+def build_response_plan(raw_text: str) -> dict[str, Any]:
+    context_request = _parse_context_request(raw_text)
+    if context_request:
+        return context_request
+    return default_edit_plan()
+
+
 def resolve_response_text(mode: ChatMode, raw_text: str, edit_plan: dict[str, Any]) -> str:
     if mode == "ask":
+        if edit_plan.get("status") == "needs_context":
+            return str(edit_plan.get("explanation") or "").strip() or "需要补充更多上下文后才能回答。"
         return str(raw_text or "").strip() or "模型未返回内容。"
     explanation = str(edit_plan.get("explanation") or "").strip()
     if explanation:
@@ -170,19 +179,20 @@ def resolve_response_text(mode: ChatMode, raw_text: str, edit_plan: dict[str, An
 
 
 def build_next_actions(mode: ChatMode, edit_plan: dict[str, Any]) -> list[dict[str, str]]:
-    if mode == "ask":
-        return []
-
     status = str(edit_plan.get("status") or "none")
-    if status == "ready":
-        return [
-            NextAction(type="review_patch", label="预览补丁").model_dump(),
-            NextAction(type="apply_patch", label="应用修改").model_dump(),
-        ]
     if status == "needs_context":
         return [
             NextAction(type="add_context", label="补充上下文").model_dump(),
             NextAction(type="retry", label="重试生成").model_dump(),
+        ]
+
+    if mode == "ask":
+        return []
+
+    if status == "ready":
+        return [
+            NextAction(type="review_patch", label="预览补丁").model_dump(),
+            NextAction(type="apply_patch", label="应用修改").model_dump(),
         ]
     if status == "none":
         return []
@@ -199,7 +209,10 @@ def build_execution_summary(
     edit_plan: dict[str, Any],
 ) -> dict[str, Any]:
     if mode == "ask":
-        headline = "已基于当前上下文生成回答"
+        if edit_plan.get("status") == "needs_context":
+            headline = "需要补充上下文后继续回答"
+        else:
+            headline = "已基于当前上下文生成回答"
     else:
         status = str(edit_plan.get("status") or "none")
         if status == "ready":

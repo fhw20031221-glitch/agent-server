@@ -85,7 +85,7 @@ async def ask_stream(
         selected_model = model_service.resolve_model(db, payload.model_key)
 
         recent_messages = chat_service.list_recent_messages_payload(db, session, limit=8)
-        if not (payload.mode == "code" and payload.context_retry):
+        if not payload.context_retry:
             chat_service.create_message(
                 db,
                 session,
@@ -198,7 +198,16 @@ async def ask_stream(
         )
 
         edit_plan = chat_protocol.default_edit_plan()
-        if payload.mode == "code":
+        if payload.mode == "ask":
+            edit_plan = chat_protocol.build_response_plan(final_text)
+            if edit_plan.get("status") == "needs_context":
+                yield emit_activity(
+                    phase="context_request",
+                    title="请求补充上下文",
+                    detail=str(edit_plan.get("explanation") or "需要补充更多上下文后继续回答"),
+                    status="done",
+                )
+        elif payload.mode == "code":
             yield emit_activity(
                 phase="interpret_response",
                 title="处理模型输出",

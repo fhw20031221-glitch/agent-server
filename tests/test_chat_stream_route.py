@@ -213,6 +213,66 @@ def test_ask_stream_route_forwards_reasoning_content(monkeypatch):
     client.close()
 
 
+def test_ask_stream_route_returns_context_request_without_persisting_assistant(monkeypatch):
+    client, SessionLocal, session_id = _build_test_context(monkeypatch)
+
+    async def fake_stream_completion(**kwargs):
+        raw = """CONTEXT_REQUEST
+reason: 需要查看入口和路由文件后才能说明各文件关系。
+queries:
+- fastapi router include
+paths:
+- app/main.py
+- app/api/routes/chat.py
+"""
+        yield "usage", {
+            "text": raw,
+            "prompt_tokens": 18,
+            "completion_tokens": 16,
+            "total_tokens": 34,
+            "model": "deepseek-chat",
+            "provider": "openai-compatible",
+        }
+
+    monkeypatch.setattr(chat_route.llm_service, "stream_completion", fake_stream_completion)
+
+    response = client.post(
+        f"/chat/sessions/{session_id}/ask/stream",
+        json={
+            "mode": "ask",
+            "question": "查看代码中的各文件关系",
+            "project_name": "demo",
+            "active_file": "",
+            "chat_files": [],
+            "repo_map_text": "- app/main.py\n- app/api/routes/chat.py",
+            "snippets": [],
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _parse_sse_payloads(response.text)
+    result = next(item for item in payloads if isinstance(item, dict) and item["type"] == "result")
+    activities = [item["payload"] for item in payloads if isinstance(item, dict) and item["type"] == "activity"]
+
+    assert result["mode"] == "ask"
+    assert result["edit_plan"]["status"] == "needs_context"
+    assert result["response"] == "需要查看入口和路由文件后才能说明各文件关系。"
+    assert result["edit_plan"]["context_queries"] == ["fastapi router include"]
+    assert result["edit_plan"]["context_paths"] == ["app/main.py", "app/api/routes/chat.py"]
+    assert [item["type"] for item in result["next_actions"]] == ["add_context", "retry"]
+    assert result["message_id"] == ""
+    assert result["execution_summary"]["headline"] == "需要补充上下文后继续回答"
+    assert any(item["phase"] == "context_request" for item in activities)
+
+    with SessionLocal() as db:
+        rows = list(db.scalars(select(ChatMessage).order_by(ChatMessage.created_at.asc())))
+        assert len(rows) == 1
+        assert rows[0].role == "user"
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
 def test_code_stream_route_returns_edit_plan_without_persisting_edit_blocks(monkeypatch):
     client, SessionLocal, session_id = _build_test_context(monkeypatch)
 
@@ -526,6 +586,62 @@ def test_code_stream_context_retry_does_not_duplicate_user_message(monkeypatch):
         assert [row.role for row in rows] == ["user", "assistant"]
         assert rows[0].content == "修复登录失败的问题"
         assert rows[1].meta["edit_plan_status"] == "ready"
+
+    app.dependency_overrides.clear()
+    client.close()
+
+
+def test_ask_stream_context_retry_does_not_duplicate_user_message(monkeypatch):
+    client, SessionLocal, session_id = _build_test_context(monkeypatch)
+
+    with SessionLocal() as db:
+        db.add(ChatMessage(session_id=session_id, role="user", content="查看代码中的各文件关系", meta={"mode": "ask"}))
+        db.commit()
+
+    async def fake_stream_completion(**kwargs):
+        yield "usage", {
+            "text": "app/main.py 负责创建 FastAPI 应用并注册 chat 路由。",
+            "prompt_tokens": 24,
+            "completion_tokens": 18,
+            "total_tokens": 42,
+            "model": "deepseek-chat",
+            "provider": "openai-compatible",
+        }
+
+    monkeypatch.setattr(chat_route.llm_service, "stream_completion", fake_stream_completion)
+
+    response = client.post(
+        f"/chat/sessions/{session_id}/ask/stream",
+        json={
+            "mode": "ask",
+            "context_retry": True,
+            "question": "查看代码中的各文件关系",
+            "project_name": "demo",
+            "active_file": "app/main.py",
+            "chat_files": [],
+            "repo_map_text": "- app/main.py",
+            "snippets": [
+                {
+                    "path": "app/main.py",
+                    "language": "python",
+                    "content": "app.include_router(chat.router)\n",
+                    "note": "",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payloads = _parse_sse_payloads(response.text)
+    result = next(item for item in payloads if isinstance(item, dict) and item["type"] == "result")
+    assert result["mode"] == "ask"
+    assert result["edit_plan"]["status"] == "none"
+
+    with SessionLocal() as db:
+        rows = list(db.scalars(select(ChatMessage).order_by(ChatMessage.created_at.asc())))
+        assert [row.role for row in rows] == ["user", "assistant"]
+        assert rows[0].content == "查看代码中的各文件关系"
+        assert rows[1].content == "app/main.py 负责创建 FastAPI 应用并注册 chat 路由。"
 
     app.dependency_overrides.clear()
     client.close()
