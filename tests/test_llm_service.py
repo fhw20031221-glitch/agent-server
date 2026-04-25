@@ -262,3 +262,74 @@ async def test_stream_agent_turn_parses_legacy_function_call_chunks(monkeypatch)
     assert tool_call["id"] == "function_call"
     assert tool_call["function"]["name"] == "workspace_search"
     assert tool_call["function"]["arguments"] == {"query": "VALID_ASPECT_RATIOS"}
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_turn_parses_camel_case_tool_call(monkeypatch):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "toolCalls": [
+                                {
+                                    "index": 0,
+                                    "call_id": "call_camel",
+                                    "functionCall": {
+                                        "name": "workspace_propose_edit",
+                                        "arguments": {
+                                            "summary": "补充注释",
+                                            "edits": [
+                                                {
+                                                    "path": "app/main.py",
+                                                    "search": "app = FastAPI()",
+                                                    "replace": "# 创建应用\napp = FastAPI()",
+                                                }
+                                            ],
+                                        },
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5},
+            }
+        ]
+        body = "\n\n".join(
+            [*[f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks], "data: [DONE]"]
+        )
+        return httpx.Response(200, text=body)
+
+    transport = httpx.MockTransport(handler)
+    original_async_client = httpx.AsyncClient
+
+    def async_client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(llm_service.httpx, "AsyncClient", async_client_factory)
+
+    events = []
+    async for kind, item in llm_service.stream_agent_turn(
+        messages=[{"role": "user", "content": "加注释"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "workspace_propose_edit",
+                    "description": "编辑预览",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        model_config=_runtime_model(),
+    ):
+        events.append((kind, item))
+
+    tool_call = next(item for kind, item in events if kind == "tool_call")
+    assert tool_call["id"] == "call_camel"
+    assert tool_call["function"]["name"] == "workspace_propose_edit"
+    assert tool_call["function"]["arguments"]["summary"] == "补充注释"

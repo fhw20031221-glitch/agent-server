@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
@@ -95,6 +97,41 @@ def _tool_debug(message: str, **fields: Any) -> None:
         text = str(value)
         safe_fields[key] = text[:500] + "..." if len(text) > 500 else text
     logger.warning("agent-tools %s %s", message, safe_fields)
+
+
+def _raw_debug_record(payload: dict[str, Any]) -> None:
+    if not settings.agent_debug_raw:
+        return
+    try:
+        file_path = Path(settings.agent_debug_log_file or "agent-raw-debug.jsonl")
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            **payload,
+        }
+        with file_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        logger.exception("agent-tools raw debug write failed")
+
+
+def _tool_call_items(container: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key in ("tool_calls", "toolCalls", "tool_call", "toolCall"):
+        raw = container.get(key)
+        if isinstance(raw, list):
+            items.extend(item for item in raw if isinstance(item, dict))
+        elif isinstance(raw, dict):
+            items.append(raw)
+    return items
+
+
+def _function_call_item(container: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("function_call", "functionCall"):
+        raw = container.get(key)
+        if isinstance(raw, dict):
+            return raw
+    return None
 
 
 def _normalize_tool_call(raw: dict[str, Any]) -> dict[str, Any]:
@@ -198,11 +235,27 @@ async def stream_agent_turn(
         )
         if raw_call.get("id"):
             current["id"] = str(raw_call.get("id") or "")
+        elif raw_call.get("tool_call_id"):
+            current["id"] = str(raw_call.get("tool_call_id") or "")
+        elif raw_call.get("call_id"):
+            current["id"] = str(raw_call.get("call_id") or "")
         if raw_call.get("type"):
             current["type"] = str(raw_call.get("type") or "")
 
         raw_function = raw_call.get("function")
         if not isinstance(raw_function, dict):
+            raw_function = _function_call_item(raw_call)
+        if not isinstance(raw_function, dict) and any(
+            key in raw_call for key in ("name", "arguments", "arguments_json")
+        ):
+            raw_function = raw_call
+        if not isinstance(raw_function, dict):
+            _tool_debug(
+                "raw_tool_call_ignored",
+                source=source,
+                index=index,
+                keys=sorted(raw_call.keys()),
+            )
             return
         current_function = current.setdefault("function", {"name": "", "arguments": ""})
         argument_value: Any = None
@@ -268,46 +321,73 @@ async def stream_agent_turn(
                         break
 
                     chunk = json.loads(data_str)
+                    _raw_debug_record(
+                        {
+                            "event": "chunk",
+                            "model": runtime_model.upstream_model,
+                            "chunk": chunk,
+                        }
+                    )
                     usage = chunk.get("usage") or {}
                     prompt_tokens = max(prompt_tokens, int(usage.get("prompt_tokens", 0) or 0))
                     completion_tokens = max(completion_tokens, int(usage.get("completion_tokens", 0) or 0))
 
                     choices = chunk.get("choices") or []
                     if not choices:
+                        _tool_debug(
+                            "chunk_no_choices",
+                            usage_prompt=usage.get("prompt_tokens", 0) or 0,
+                            usage_completion=usage.get("completion_tokens", 0) or 0,
+                            keys=sorted(chunk.keys()),
+                        )
                         continue
                     choice = choices[0]
                     delta = choice.get("delta") or {}
+                    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
                     reasoning_piece = str(delta.get("reasoning_content") or "")
+                    content_piece = delta.get("content")
+                    piece = "" if content_piece is None else str(content_piece)
+                    _tool_debug(
+                        "chunk",
+                        finish_reason=choice.get("finish_reason") or "",
+                        delta_keys=sorted(delta.keys()) if isinstance(delta, dict) else [],
+                        message_keys=sorted(message.keys()) if isinstance(message, dict) else [],
+                        content_piece_length=len(piece),
+                        reasoning_piece_length=len(reasoning_piece),
+                        accumulated_content_length=len(accumulated_text) + len(piece),
+                        accumulated_reasoning_length=len(accumulated_reasoning) + len(reasoning_piece),
+                        delta_tool_call_count=len(_tool_call_items(delta)) if isinstance(delta, dict) else 0,
+                        message_tool_call_count=len(_tool_call_items(message)) if isinstance(message, dict) else 0,
+                        has_function_call=bool(_function_call_item(delta) or _function_call_item(message)),
+                        usage_prompt=usage.get("prompt_tokens", 0) or 0,
+                        usage_completion=usage.get("completion_tokens", 0) or 0,
+                    )
                     if reasoning_piece:
                         accumulated_reasoning += reasoning_piece
                         yield "reasoning", accumulated_reasoning
 
-                    piece = str(delta.get("content") or "")
                     if piece:
                         accumulated_text += piece
                         yield "partial", sanitize_generated_text(accumulated_text, aggressive=False)
 
-                    for raw_call_index, raw_call in enumerate(delta.get("tool_calls") or []):
-                        if not isinstance(raw_call, dict):
-                            continue
+                    for raw_call_index, raw_call in enumerate(_tool_call_items(delta)):
                         merge_tool_call(raw_call, raw_call_index, source="delta.tool_calls")
 
-                    if isinstance(delta.get("function_call"), dict):
-                        merge_legacy_function_call(delta["function_call"])
+                    delta_function_call = _function_call_item(delta)
+                    if isinstance(delta_function_call, dict):
+                        merge_legacy_function_call(delta_function_call)
 
-                    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
                     message_content = str(message.get("content") or "")
                     if message_content and not accumulated_text:
                         accumulated_text = message_content
                         yield "partial", sanitize_generated_text(accumulated_text, aggressive=False)
 
-                    for raw_call_index, raw_call in enumerate(message.get("tool_calls") or []):
-                        if not isinstance(raw_call, dict):
-                            continue
+                    for raw_call_index, raw_call in enumerate(_tool_call_items(message)):
                         merge_tool_call(raw_call, raw_call_index, replace=True, source="message.tool_calls")
 
-                    if isinstance(message.get("function_call"), dict):
-                        merge_legacy_function_call(message["function_call"], replace=True)
+                    message_function_call = _function_call_item(message)
+                    if isinstance(message_function_call, dict):
+                        merge_legacy_function_call(message_function_call, replace=True)
     except httpx.ReadTimeout as exc:
         raise RuntimeError(
             f"调用模型超时（{settings.openai_timeout_seconds} 秒）。请检查当前网络、代理设置，或稍后重试。"
@@ -336,6 +416,9 @@ async def stream_agent_turn(
             for item in normalized_tool_calls
         ],
         text_length=len(cleaned),
+        reasoning_length=len(accumulated_reasoning.strip()),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
     for tool_call in normalized_tool_calls:
         yield "tool_call", tool_call
